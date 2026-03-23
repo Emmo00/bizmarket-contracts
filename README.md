@@ -1,66 +1,191 @@
-## Foundry
+# BizMarket Loan Vault Contracts
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+A Solidity contract system implementing a time-locked, yield-bearing loan vault with round-based funding and installment payouts.
 
-Foundry consists of:
+## Overview
 
-- **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
-- **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
-- **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
-- **Chisel**: Fast, utilitarian, and verbose solidity REPL.
+The `LoanVault` contract enables users to deposit stablecoins, receive a percentage fee deduction, and earn yield distributed over a fixed 12-week period (1 week per installment). Payouts are unlocked based on both block-time and funded funding rounds, whichever is more restrictive.
 
-## Documentation
+**Key mechanics:**
+- Users buy in by depositing stablecoins; a configurable fee is deducted and the net principal earns yield.
+- Yield is distributed as 12 equal weekly installments over 3 months.
+- Funding rounds must be manually triggered by a loan manager at least 1 week apart.
+- Users can only claim available payouts if both conditions are met:
+  - At least 1 week has passed since their position opened (by block time).
+  - At least 1 funded round has passed since their position started (by round index).
+- Positions are automatically deleted once all 12 installments have been claimed.
 
-https://book.getfoundry.sh/
+## Contract Architecture
+
+### LoanVault.sol
+
+Main vault contract. Manages user positions, yield distribution, and claims.
+
+**Key State:**
+- `STABLECOIN`: immutable ERC20 token for all transfers.
+- `currentRound`: active funding round (starts at 0).
+- `scheduledRoundPayout`: map of round → total installment amount owed for that round.
+- `positions`: map of user → array of Position structs.
+- `buyInFeePercentage`: configurable buy-in fee in basis points (default 100 = 1%).
+- `yieldPercentage`: configurable annual yield in basis points (default 500 = 5%).
+
+**Core Functions:**
+
+| Function | Role | Access | Effect |
+|----------|------|--------|--------|
+| `buyIn(amount)` | Deposit stablecoin | Public | Deduct fee, create position, schedule payouts for 12 future rounds. |
+| `claimPayout(receiver)` | Claim unlocked payouts | Public | Calculate unlocked installments (min of time/round unlock), transfer to receiver, delete fully matured positions. |
+| `depositYield()` | Fund next round | Loan Manager | Pull scheduled payout amount from manager, advance round, update last claim epoch. |
+| `setBuyInFeePercentage(%)` | Update fee | Loan Manager | Bounded to ≤ 10000 (100%). |
+| `setYieldPercentage(%)` | Update yield | Loan Manager | Bounded to ≤ 10000 (100%). |
+
+### ToronetStandard.sol
+
+Base contract providing ownership and administrative controls. ⚠️ **Warning**: Contains a deprecated `destroy()` function (selfdestruct) callable by initial deployer. This is not recommended for production vaults on Cancun+ networks.
+
+### LoanVaultEvents.sol
+
+Event declarations for logging vault state changes.
+
+### lib/Percentage.sol
+
+Utility library for percentage calculations in basis points (100 = 1%, 10000 = 100%).
+
+## Key Parameters
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| `PAYOUT_INTERVAL` | 1 week | Minimum block time between installments. |
+| `NB_OF_PAYOUT_INSTALLATIONS` | 12 | Total installments per position (3 months). |
+| `buyInFeePercentage` | 100 bps (1%) | Configurable; capped at 10000. |
+| `yieldPercentage` | 500 bps (5%) | Configurable; capped at 10000. |
 
 ## Usage
 
-### Build
+### User Flow
+
+1. **Approve token**: User approves LoanVault to spend stablecoin.
+   ```solidity
+   IERC20(stablecoin).approve(vault, amount);
+   ```
+
+2. **Buy in**: Deposit principal + fee. Fee goes to treasury; principal is scheduled for yield payouts.
+   ```solidity
+   vault.buyIn(1_000_000); // e.g., 1M units (6 decimals = $1M)
+   ```
+
+3. **Wait for funding**: Loan manager must call `depositYield()` weekly to fund the vault for payouts.
+
+4. **Claim after unlock**: Once both conditions are met (1 week passed + 1 funded round), claim payouts.
+   ```solidity
+   uint256 claimed = vault.claimPayout(receiver);
+   ```
+
+5. **Repeat weekly**: Call `claimPayout()` weekly to collect each installment until all 12 are withdrawn.
+
+### Admin Flow (Loan Manager)
+
+1. **Fund round weekly**: At most once per week, pull the total scheduled payout amount and advance the round.
+   ```solidity
+   vault.depositYield();
+   ```
+
+2. **Update parameters** (optional): Adjust fee and yield percentages between buy-ins (only affects new positions).
+   ```solidity
+   vault.setBuyInFeePercentage(150);   // 1.5%
+   vault.setYieldPercentage(800);      // 8%
+   ```
+
+## Testing
+
+Run the full test suite:
 
 ```shell
-$ forge build
+forge test
 ```
 
-### Test
+Run only LoanVault tests:
 
 ```shell
-$ forge test
+forge test --match-path test/LoanVault.t.sol -vv
 ```
 
-### Format
+**Test Coverage:**
+- Buy-in accounting and position creation.
+- Payout calculation with default and custom parameters.
+- Claim unlock logic (time + round constraints).
+- Deposit yield funding and insufficient balance.
+- Access control on admin functions.
+- Zero-installment edge case (documented as known limitation).
+
+## Build & Format
 
 ```shell
-$ forge fmt
+# Compile
+forge build
+
+# Format code
+forge fmt
 ```
 
-### Gas Snapshots
+## Security Considerations
 
+⚠️ **Known Issues (from audit):**
+
+1. **Inherited selfdestruct backdoor**: `ToronetOwnable.destroy()` is callable by the initial deployer forever. On chains without EIP-6780 (legacy selfdestruct), this can permanently remove vault code and freeze all funds. 
+   - **Mitigation**: Override `destroy()` to revert or remove this contract from the inheritance chain for production.
+
+2. **Zero-installment trap**: Buy-ins smaller than 12 units produce `payoutAmount = 0` due to integer division. Claims revert with "No payouts available" and positions never complete.
+   - **Mitigation**: Enforce minimum buy-in amount or track and skip zero-payout positions during claim.
+
+3. **Non-standard token assumptions**: The contract assumes exact ERC20 transfer semantics. Fee-on-transfer or rebasing tokens will cause accounting mismatches.
+   - **Mitigation**: Restrict to known standard stablecoins (USDC, USDT, etc.).
+
+4. **Unbounded admin parameters**: No hard caps on `buyInFeePercentage` and `yieldPercentage` until runtime checks were added.
+   - **Status**: Fixed in v1.0 with 10000 bps caps.
+
+5. **Linear-time claims**: Each `claimPayout()` iterates all user positions. Users with many positions may hit gas limits.
+   - **Mitigation**: Implement batched claiming or position consolidation.
+
+## Deployment
+
+### Prerequisites
+- Foundry installed ([forge](https://book.getfoundry.sh/))
+- RPC URL and private key for target network
+
+### Example Deployment Script
+
+```solidity
+// script/DeployLoanVault.s.sol
+import {Script} from "forge-std/Script.sol";
+import {LoanVault} from "../src/LoanVault.sol";
+
+contract DeployLoanVault is Script {
+    function run() external {
+        address stablecoin = 0x...; // e.g., USDC on Mainnet
+        address treasury = 0x...;   // Fee collection address
+        address loanManager = 0x...; // Funding manager address
+
+        vm.startBroadcast();
+        LoanVault vault = new LoanVault(stablecoin, treasury, loanManager);
+        vm.stopBroadcast();
+    }
+}
+```
+
+Deploy:
 ```shell
-$ forge snapshot
+forge script script/DeployLoanVault.s.sol:DeployLoanVault \
+  --rpc-url https://mainnet.infura.io/v3/<KEY> \
+  --private-key <YOUR_KEY> \
+  --broadcast
 ```
 
-### Anvil
+## Dependencies
 
-```shell
-$ anvil
-```
+- **OpenZeppelin Contracts** (`@openzeppelin/contracts`): ERC20 interface and utilities.
+- **Forge Std** (`forge-std`): Testing framework.
 
-### Deploy
+## License
 
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
-```
-
-### Cast
-
-```shell
-$ cast <subcommand>
-```
-
-### Help
-
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
-```
+MIT
