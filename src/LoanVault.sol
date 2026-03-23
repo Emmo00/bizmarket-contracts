@@ -14,9 +14,10 @@ contract LoanVault is ToronetOwnable, LoanVaultEvents {
 
     uint256 public buyInFeePercentage = 100; // 1% fee
     uint256 public yieldPercentage = 500; // 5% yield
-    uint256 public totalNextPayoutAmount;
     uint256 public lastClaimEpoch;
-    uint256[] public fundingEpochs;
+    uint256 public currentRound; // starts at 0, increments by 1 at each funding round
+
+    mapping(uint256 => uint256) public scheduledRoundPayout; // round index => total payout amount scheduled for this round (sum of all positions installments that should be paid at this round)
 
     address public treasury;
     address public loanManager;
@@ -24,9 +25,8 @@ contract LoanVault is ToronetOwnable, LoanVaultEvents {
     struct Position {
         uint256 principal; // Amount of stablecoin deposited
         uint256 startTime; // Timestamp when the position was opened
+        uint256 startRound; // Funding round index when position was opened
         uint256 nbClaims; // total number of times the owner of this position has claimed payout
-        uint256 fundedInstallments; // total number of installments unlocked by funded rounds
-        uint256 lastProcessedFundingRound; // number of funding rounds already applied to this position
         uint256 payoutAmount; // Amount of the next payout to be claimed
     }
 
@@ -68,15 +68,19 @@ contract LoanVault is ToronetOwnable, LoanVaultEvents {
             Position({
                 principal: netAmount,
                 startTime: block.timestamp,
+                startRound: currentRound,
                 nbClaims: 0,
-                fundedInstallments: 0,
-                lastProcessedFundingRound: fundingEpochs.length,
                 payoutAmount: nextPayoutAmount
             })
         );
 
-        // Update the total next payout amount for all positions
-        totalNextPayoutAmount += nextPayoutAmount;
+        // Schedule one installment per future funded round.
+        for (uint256 installment = 1; installment <= NB_OF_PAYOUT_INSTALLATIONS;) {
+            scheduledRoundPayout[currentRound + installment] += nextPayoutAmount;
+            unchecked {
+                installment++;
+            }
+        }
 
         emit PositionBoughtIn(msg.sender, amount, fee, netAmount, nextPayoutAmount);
     }
@@ -88,46 +92,37 @@ contract LoanVault is ToronetOwnable, LoanVaultEvents {
         require(userPositions.length > 0, "No active positions");
 
         uint256 totalPayoutToClaim = 0;
-        uint256 totalFundingRounds = fundingEpochs.length;
 
         for (uint256 i = userPositions.length; i > 0;) {
             uint256 index = i - 1;
             Position storage position = userPositions[index];
 
-            uint256 fundedInstallments = position.fundedInstallments;
-            uint256 nextFundingRoundToProcess = position.lastProcessedFundingRound;
-
-            while (nextFundingRoundToProcess < totalFundingRounds && fundedInstallments < NB_OF_PAYOUT_INSTALLATIONS) {
-                uint256 fundingEpoch = fundingEpochs[nextFundingRoundToProcess];
-                uint256 nextInstallmentUnlockTime =
-                    position.startTime + ((fundedInstallments + 1) * PAYOUT_INTERVAL);
-
-                // Each funding round can unlock at most one installment for a position,
-                // and only when that installment lock period has elapsed.
-                if (fundingEpoch >= nextInstallmentUnlockTime) {
-                    fundedInstallments++;
-                }
-
-                nextFundingRoundToProcess++;
+            uint256 unlockedByRounds = 0;
+            if (currentRound > position.startRound) {
+                unlockedByRounds = currentRound - position.startRound;
             }
 
-            position.lastProcessedFundingRound = totalFundingRounds;
-            position.fundedInstallments = fundedInstallments;
+            uint256 unlockedByTime = (block.timestamp - position.startTime) / PAYOUT_INTERVAL;
 
-            if (position.nbClaims < fundedInstallments) {
-                uint256 nbPendingClaims = fundedInstallments - position.nbClaims;
+            uint256 unlockedInstallments = unlockedByRounds; // min(unlockedByRounds, unlockedByTime, NB_OF_PAYOUT_INSTALLATIONS) will be calculated below
+            if (unlockedByTime < unlockedInstallments) {
+                unlockedInstallments = unlockedByTime;
+            }
+
+            if (unlockedInstallments > NB_OF_PAYOUT_INSTALLATIONS) {
+                unlockedInstallments = NB_OF_PAYOUT_INSTALLATIONS;
+            }
+
+            if (position.nbClaims < unlockedInstallments) {
+                uint256 nbPendingClaims = unlockedInstallments - position.nbClaims;
                 totalPayoutToClaim += nbPendingClaims * position.payoutAmount;
-                position.nbClaims = fundedInstallments;
+                position.nbClaims = unlockedInstallments;
             }
 
             if (position.nbClaims == NB_OF_PAYOUT_INSTALLATIONS) {
                 // delete position from user list
-                uint256 payoutAmount = position.payoutAmount;
                 userPositions[index] = userPositions[userPositions.length - 1];
                 userPositions.pop();
-
-                // update total next payout amount for all positions
-                totalNextPayoutAmount -= payoutAmount;
             }
 
             unchecked {
@@ -145,18 +140,20 @@ contract LoanVault is ToronetOwnable, LoanVaultEvents {
 
         return totalPayoutToClaim;
     }
-
+    
     // ========= admin functions =========
     function depositYield() external onlyLoanManager {
         require(lastClaimEpoch == 0 || block.timestamp >= lastClaimEpoch + PAYOUT_INTERVAL, "Funding round too early");
 
+        uint256 roundToFund = currentRound + 1;
+        uint256 amountToDeposit = scheduledRoundPayout[roundToFund];
+
         // Deposit the specified amount of stablecoin as yield to be distributed to depositors
-        uint256 amountToDeposit = totalNextPayoutAmount;
         require(STABLECOIN.transferFrom(msg.sender, address(this), amountToDeposit), "Transfer failed");
 
-        // New funded round unlock epoch.
+        // Advance to the newly funded round.
+        currentRound = roundToFund;
         lastClaimEpoch = block.timestamp;
-        fundingEpochs.push(lastClaimEpoch);
 
         emit YieldDeposited(msg.sender, amountToDeposit, lastClaimEpoch);
     }
@@ -173,6 +170,10 @@ contract LoanVault is ToronetOwnable, LoanVaultEvents {
         yieldPercentage = _yieldPercentage;
 
         emit YieldPercentageUpdated(previousValue, _yieldPercentage);
+    }
+
+    function totalNextPayoutAmount() external view returns (uint256) {
+        return scheduledRoundPayout[currentRound + 1];
     }
 
     function _onlyLoanManager() internal view {
