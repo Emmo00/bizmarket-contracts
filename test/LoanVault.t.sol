@@ -90,7 +90,7 @@ contract LoanVaultTest is Test {
         vm.prank(alice);
         vault.buyIn(amount);
 
-        (, , , , uint256 payoutAmount) = vault.positions(alice, 0);
+        (,,,, uint256 payoutAmount) = vault.positions(alice, 0);
 
         uint256 expectedFee = (amount * 100) / 10_000;
         uint256 expectedNet = amount - expectedFee;
@@ -111,7 +111,7 @@ contract LoanVaultTest is Test {
         vm.prank(alice);
         vault.buyIn(amount);
 
-        (, uint256 startTime, , , uint256 payoutAmount) = vault.positions(alice, 0);
+        (, uint256 startTime,,, uint256 payoutAmount) = vault.positions(alice, 0);
 
         uint256 expectedFee = (amount * 250) / 10_000;
         uint256 expectedNet = amount - expectedFee;
@@ -157,8 +157,16 @@ contract LoanVaultTest is Test {
         vm.prank(loanManager);
         vault.depositYield();
 
-        assertEq(stablecoin.balanceOf(loanManager), managerBalanceBefore - expectedRoundAmount, "manager should fund exact scheduled amount");
-        assertEq(stablecoin.balanceOf(address(vault)), vaultBalanceBefore + expectedRoundAmount, "vault should receive exact scheduled amount");
+        assertEq(
+            stablecoin.balanceOf(loanManager),
+            managerBalanceBefore - expectedRoundAmount,
+            "manager should fund exact scheduled amount"
+        );
+        assertEq(
+            stablecoin.balanceOf(address(vault)),
+            vaultBalanceBefore + expectedRoundAmount,
+            "vault should receive exact scheduled amount"
+        );
         assertEq(vault.currentRound(), 1, "funding should advance round by one");
     }
 

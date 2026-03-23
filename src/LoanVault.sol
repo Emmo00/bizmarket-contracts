@@ -140,7 +140,7 @@ contract LoanVault is ToronetOwnable, LoanVaultEvents {
 
         return totalPayoutToClaim;
     }
-    
+
     // ========= admin functions =========
     function depositYield() external onlyLoanManager {
         require(lastClaimEpoch == 0 || block.timestamp >= lastClaimEpoch + PAYOUT_INTERVAL, "Funding round too early");
