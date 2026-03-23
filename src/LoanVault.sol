@@ -104,7 +104,7 @@ contract LoanVault is ToronetOwnable, LoanVaultEvents {
 
             uint256 unlockedByTime = (block.timestamp - position.startTime) / PAYOUT_INTERVAL;
 
-            uint256 unlockedInstallments = unlockedByRounds; // min(unlockedByRounds, unlockedByTime, NB_OF_PAYOUT_INSTALLATIONS) will be calculated below
+            uint256 unlockedInstallments = unlockedByRounds; // min(unlockedByRounds, unlockedByTime, NB_OF_PAYOUT_INSTALLATIONS)
             if (unlockedByTime < unlockedInstallments) {
                 unlockedInstallments = unlockedByTime;
             }
@@ -159,6 +159,7 @@ contract LoanVault is ToronetOwnable, LoanVaultEvents {
     }
 
     function setBuyInFeePercentage(uint256 _buyInFeePercentage) external onlyLoanManager {
+        require(_buyInFeePercentage <= 10000, "Buy-in fee percentage cannot exceed 10000 (100%)");
         uint256 previousValue = buyInFeePercentage;
         buyInFeePercentage = _buyInFeePercentage;
 
@@ -166,6 +167,7 @@ contract LoanVault is ToronetOwnable, LoanVaultEvents {
     }
 
     function setYieldPercentage(uint256 _yieldPercentage) external onlyLoanManager {
+        require(_yieldPercentage <= 10000, "Yield percentage cannot exceed 10000 (100%)");
         uint256 previousValue = yieldPercentage;
         yieldPercentage = _yieldPercentage;
 
