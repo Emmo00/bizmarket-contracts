@@ -140,6 +140,21 @@ contract LoanVault is ToronetOwnable, LoanVaultEvents {
         return maturedPayout;
     }
 
+    function getPositions(address account) external view returns (Position[] memory) {
+        Position[] storage userPositions = positions[account];
+        Position[] memory allPositions = new Position[](userPositions.length);
+
+        for (uint256 i = 0; i < userPositions.length;) {
+            allPositions[i] = userPositions[i];
+
+            unchecked {
+                i++;
+            }
+        }
+
+        return allPositions;
+    }
+
     // ========= admin functions =========
     function depositYield() external onlyLoanManager {
         uint256 currentBalance = STABLECOIN.balanceOf(address(this));

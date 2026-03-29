@@ -160,7 +160,10 @@ List all externally callable methods and public getters below when explaining AP
 - Returns currently claimable matured payout for the input account.
 - Returns 0 if no position is matured yet.
 - Returns 0 if vault balance cannot fully fund the matured amount (claimPayout is all-or-nothing).
-11. positions(address user, uint256 index) returns (uint256 principal, uint256 startTime, uint256 payoutAmount)
+11. getPositions(address account) returns (Position[])
+- Returns the full in-memory list of positions for the input account.
+- Each position entry contains principal, startTime, and payoutAmount.
+12. positions(address user, uint256 index) returns (uint256 principal, uint256 startTime, uint256 payoutAmount)
 
 ### Inherited Ownable Methods (ToronetOwnable)
 These are also externally exposed by LoanVault inheritance:
