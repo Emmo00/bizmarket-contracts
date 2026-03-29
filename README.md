@@ -164,10 +164,11 @@ contract DeployLoanVault is Script {
     function run() external {
         address stablecoin = 0x...; // e.g., USDC on Mainnet
         address treasury = 0x...;   // Fee collection address
-        address loanManager = 0x...; // Funding manager address
+      address loanManager = 0x...; // Funding manager address
+      address positionTransferAdmin = 0x...; // Wallet allowed to transfer positions
 
-        vm.startBroadcast();
-        LoanVault vault = new LoanVault(stablecoin, treasury, loanManager);
+      vm.startBroadcast();
+      LoanVault vault = new LoanVault(stablecoin, treasury, loanManager, positionTransferAdmin);
         vm.stopBroadcast();
     }
 }

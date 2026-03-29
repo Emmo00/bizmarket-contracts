@@ -9,7 +9,7 @@ abstract contract LoanVaultEvents {
         uint256 grossAmount,
         uint256 feeAmount,
         uint256 netPrincipal,
-        uint256 payoutPerInstallment
+        uint256 payoutAmount
     );
 
     event PayoutClaimed(address indexed account, address indexed receiver, uint256 amountClaimed);
@@ -19,4 +19,16 @@ abstract contract LoanVaultEvents {
     event BuyInFeePercentageUpdated(uint256 previousValue, uint256 newValue);
 
     event YieldPercentageUpdated(uint256 previousValue, uint256 newValue);
+
+    event PositionTransferAdminUpdated(address indexed previousAdmin, address indexed newAdmin);
+
+    event PositionTransferred(
+        address indexed operator,
+        address indexed from,
+        address indexed to,
+        uint256 positionIndex,
+        uint256 principal,
+        uint256 payoutAmount,
+        uint256 startTime
+    );
 }

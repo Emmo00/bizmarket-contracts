@@ -3,5 +3,8 @@
         "BIZSHARE",
         "IERC",
         "Toronet"
-    ]
+    ],
+    "chat.tools.terminal.autoApprove": {
+        "forge": true
+    }
 }

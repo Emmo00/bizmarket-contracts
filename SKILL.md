@@ -17,47 +17,50 @@ This skill is specific to the contracts in this repository:
 Do not invent behavior not present in those contracts.
 
 ## Protocol Summary
-The protocol is a time-locked, round-funded payout vault:
+The protocol is a time-locked, maturity-claim vault:
 - Users buy in with a stablecoin amount.
 - A buy-in fee is taken (in basis points), and net principal is recorded as a position.
-- The position total value is increased by a yield percentage (basis points), then split into 12 equal installments.
-- Installments unlock only when both constraints are satisfied:
-  - enough wall-clock time has passed (1 week per installment), and
-  - enough funding rounds have been advanced by the loan manager.
-- The loan manager must fund each round by calling depositYield() at least 1 week apart.
+- The net principal is increased by a yield percentage to produce one total payout amount.
+- Funds are locked for a fixed 3-month period (LOCK_PERIOD = 12 weeks).
+- Users can claim only after lock maturity, and they receive matured position payouts in a single claim transaction.
+- The loan manager funds the vault by topping up the current shortfall between vault balance and total outstanding liability.
+- Position ownership can be migrated only by a dedicated transfer-admin wallet.
 
 ## Core Concepts
 - Stablecoin source of truth: STABLECOIN (IERC20).
-- Installment cadence: PAYOUT_INTERVAL = 1 week.
-- Installment count: NB_OF_PAYOUT_INSTALLATIONS = 12.
-- Rounds: currentRound starts at 0 and increments on each successful depositYield().
-- Scheduled liabilities: scheduledRoundPayout[round] stores aggregate installment obligations due for that round.
+- Lock period: LOCK_PERIOD = 12 weeks.
+- Liability accounting: totalLiability stores aggregate payout obligations across all active positions.
 - Position fields:
   - principal: net principal after fee
   - startTime: timestamp at buy-in
-  - startRound: round index at buy-in
-  - nbClaims: installments already claimed
-  - payoutAmount: fixed amount claimable per installment
+  - payoutAmount: full amount claimable after maturity
 
 ## Access Model
-There are two control domains:
+There are three control domains:
 - Loan manager domain (custom role in LoanVault): can fund rounds and update fee/yield parameters.
+- Position transfer admin domain (custom role in LoanVault): can transfer positions between wallets.
 - Ownable domain (inherited from ToronetOwnable): owner/initialOwner controls ownership management and destroy().
 
-Important: LoanVault admin functions are restricted by onlyLoanManager, not by onlyOwner.
+Important:
+- Funding/fee/yield admin functions are restricted by onlyLoanManager.
+- Position transfer function is restricted by onlyPositionTransferAdmin.
+- setPositionTransferAdmin(...) is restricted by onlyOwner.
 
 ## User-Facing Flow
 1. User approves LoanVault to spend stablecoin.
 2. User calls buyIn(amount).
-3. Loan manager periodically calls depositYield() (weekly).
-4. User calls claimPayout(receiver) when installments have unlocked.
-5. After 12 claimed installments for a position, it is removed automatically.
+3. Loan manager funds vault shortfall by calling depositYield() as needed.
+4. User waits until at least 3 months have elapsed for each position.
+5. User calls claimPayout(receiver) to claim all matured positions.
+6. Claimed matured positions are removed automatically.
 
 ## Admin/Manager Flow
 1. Loan manager keeps allowance and stablecoin balance ready.
-2. Calls depositYield() no more than once per week.
+2. Calls depositYield() when vault balance is below totalLiability.
 3. Optionally calls setBuyInFeePercentage(...) and setYieldPercentage(...).
-4. Monitors totalNextPayoutAmount() to estimate next funding amount.
+4. Monitors nextYieldDepositAmount() as current funding shortfall.
+5. Owner can rotate transfer admin with setPositionTransferAdmin(...).
+6. Transfer admin can call transferPosition(from, to, index) for admin-gated migrations.
 
 ## Externally Exposed Methods
 List all externally callable methods and public getters below when explaining API surface.
@@ -72,9 +75,9 @@ List all externally callable methods and public getters below when explaining AP
   - transfers gross amount from user to treasury
   - computes fee = amount * buyInFeePercentage / 10000
   - netAmount = amount - fee
-  - payoutAmount = (netAmount + netAmount * yieldPercentage / 10000) / 12
+  - payoutAmount = netAmount + netAmount * yieldPercentage / 10000
   - creates new position for msg.sender
-  - adds payoutAmount to scheduledRoundPayout for next 12 rounds
+  - increases totalLiability by payoutAmount
 - Emits: PositionBoughtIn
 
 2. claimPayout(address receiver) returns (uint256)
@@ -82,16 +85,12 @@ List all externally callable methods and public getters below when explaining AP
 - Preconditions:
   - receiver != address(0)
   - user has at least one active position
-  - at least one installment is unlocked across positions
+  - at least one position has matured: block.timestamp >= position.startTime + LOCK_PERIOD
   - vault has enough STABLECOIN balance for total claim
-- Unlock logic per position:
-  - unlockedByRounds = max(currentRound - startRound, 0)
-  - unlockedByTime = (block.timestamp - startTime) / 1 week
-  - unlockedInstallments = min(unlockedByRounds, unlockedByTime, 12)
 - Effects:
-  - claims all newly unlocked installments across all caller positions
-  - updates nbClaims
-  - removes fully claimed positions (12/12)
+  - sums payoutAmount for all matured positions owned by caller
+  - decreases totalLiability by claimed matured amounts
+  - removes matured positions from caller position array
   - transfers total payout to receiver
 - Emits: PayoutClaimed
 
@@ -99,16 +98,12 @@ List all externally callable methods and public getters below when explaining AP
 1. depositYield()
 - Access: loanManager only
 - Preconditions:
-  - first call always allowed
-  - subsequent calls require block.timestamp >= lastClaimEpoch + 1 week
+  - vault must not already be fully funded (balance < totalLiability)
   - loanManager approved vault for STABLECOIN transferFrom
-  - loanManager has enough STABLECOIN to fund scheduled amount
+  - loanManager has enough STABLECOIN to fund shortfall
 - Effects:
-  - roundToFund = currentRound + 1
-  - amountToDeposit = scheduledRoundPayout[roundToFund]
+  - amountToDeposit = totalLiability - STABLECOIN.balanceOf(vault)
   - transferFrom(loanManager -> vault, amountToDeposit)
-  - currentRound = roundToFund
-  - lastClaimEpoch = block.timestamp
 - Emits: YieldDeposited
 
 2. setBuyInFeePercentage(uint256 _buyInFeePercentage)
@@ -127,21 +122,45 @@ List all externally callable methods and public getters below when explaining AP
   - updates yieldPercentage for future buy-ins
 - Emits: YieldPercentageUpdated
 
+### Position Transfer Admin Methods
+1. transferPosition(address from, address to, uint256 positionIndex)
+- Access: positionTransferAdmin only
+- Preconditions:
+  - from != address(0)
+  - to != address(0)
+  - positionIndex is valid for positions[from]
+- Effects:
+  - removes selected position from from
+  - appends same position to to
+  - does not change totalLiability
+- Emits: PositionTransferred
+
+### Owner Methods Specific To Transfer Admin
+1. setPositionTransferAdmin(address _positionTransferAdmin)
+- Access: onlyOwner
+- Preconditions:
+  - _positionTransferAdmin != address(0)
+- Effects:
+  - updates positionTransferAdmin role wallet
+- Emits: PositionTransferAdminUpdated
+
 ### Public Read Methods / Getters (anyone)
-1. totalNextPayoutAmount() returns (uint256)
-- Returns scheduledRoundPayout[currentRound + 1]
+1. nextYieldDepositAmount() returns (uint256)
+- Returns max(totalLiability - STABLECOIN.balanceOf(vault), 0)
 
 2. STABLECOIN() returns (address)
-3. PAYOUT_INTERVAL() returns (uint256)
-4. NB_OF_PAYOUT_INSTALLATIONS() returns (uint256)
-5. buyInFeePercentage() returns (uint256)
-6. yieldPercentage() returns (uint256)
-7. lastClaimEpoch() returns (uint256)
-8. currentRound() returns (uint256)
-9. scheduledRoundPayout(uint256 round) returns (uint256)
-10. treasury() returns (address)
-11. loanManager() returns (address)
-12. positions(address user, uint256 index) returns (uint256 principal, uint256 startTime, uint256 startRound, uint256 nbClaims, uint256 payoutAmount)
+3. LOCK_PERIOD() returns (uint256)
+4. buyInFeePercentage() returns (uint256)
+5. yieldPercentage() returns (uint256)
+6. totalLiability() returns (uint256)
+7. treasury() returns (address)
+8. loanManager() returns (address)
+9. positionTransferAdmin() returns (address)
+10. availablePayout(address account) returns (uint256)
+- Returns currently claimable matured payout for the input account.
+- Returns 0 if no position is matured yet.
+- Returns 0 if vault balance cannot fully fund the matured amount (claimPayout is all-or-nothing).
+11. positions(address user, uint256 index) returns (uint256 principal, uint256 startTime, uint256 payoutAmount)
 
 ### Inherited Ownable Methods (ToronetOwnable)
 These are also externally exposed by LoanVault inheritance:
@@ -162,11 +181,13 @@ These are also externally exposed by LoanVault inheritance:
 
 ## Event Surface
 - LoanVaultInitialized(stablecoin, treasury, loanManager)
-- PositionBoughtIn(account, grossAmount, feeAmount, netPrincipal, payoutPerInstallment)
+- PositionBoughtIn(account, grossAmount, feeAmount, netPrincipal, payoutAmount)
 - PayoutClaimed(account, receiver, amountClaimed)
 - YieldDeposited(loanManager, amount, claimEpoch)
 - BuyInFeePercentageUpdated(previousValue, newValue)
 - YieldPercentageUpdated(previousValue, newValue)
+- PositionTransferAdminUpdated(previousAdmin, newAdmin)
+- PositionTransferred(operator, from, to, positionIndex, principal, payoutAmount, startTime)
 - OwnershipTransferred(previousOwner, newOwner) (inherited)
 
 ## Math Rules (Basis Points)
@@ -178,20 +199,19 @@ Use basis points convention:
 Key formulas:
 - fee = amount * buyInFeePercentage / 10000
 - net = amount - fee
-- grossWithYield = net + (net * yieldPercentage / 10000)
-- payoutPerInstallment = grossWithYield / 12
+- payoutAmount = net + (net * yieldPercentage / 10000)
+- fundingShortfall = max(totalLiability - vaultBalance, 0)
 
 Integer division truncates toward zero.
 
 ## Important Caveats and Risks
 When explaining the protocol, always mention these:
-1. Zero-installment trap:
-- Very small buy-ins can produce payoutAmount == 0 due to integer division by 12.
-- Such positions can become effectively unclaimable (claim reverts with no payout).
+1. Full lock behavior:
+- Users cannot claim anything before lock maturity; no weekly or partial installment claims exist.
 
 2. Funding dependency:
-- Time passage alone is not enough. Claims also require funded rounds.
-- If loan manager stops calling depositYield(), claims stall.
+- Time maturity alone is not enough. Vault still needs enough funded balance for payout transfer.
+- If loan manager does not top up shortfall, matured claims can still fail.
 
 3. Linear claim complexity:
 - claimPayout iterates all user positions; many positions can increase gas costs.
@@ -199,7 +219,11 @@ When explaining the protocol, always mention these:
 4. Token assumptions:
 - Logic assumes standard ERC20 transfer behavior.
 
-5. Inherited destroy() backdoor:
+5. Configuration edge case:
+- If buyInFeePercentage is set to 10000 (100%), net principal and payout can become 0.
+- Zero-payout matured positions can make claimPayout revert with "No payouts available to claim" for affected users.
+
+6. Inherited destroy() backdoor:
 - initialOwner can call destroy(); this can be catastrophic depending on chain semantics.
 
 ## Response Behavior For The Agent
@@ -224,4 +248,5 @@ When this skill is used, answer with this structure:
 - Do not claim support for partial claims by position id (not implemented).
 - Do not claim manager can directly withdraw vault funds (no such method in LoanVault).
 - Do not conflate owner and loanManager roles.
-- Do not state that payouts unlock by time only.
+- Do not state that payouts unlock weekly or by rounds.
+- Do not omit the separate positionTransferAdmin role.

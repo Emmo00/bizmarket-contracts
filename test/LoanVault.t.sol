@@ -18,20 +18,20 @@ contract MockStablecoin is ERC20 {
 }
 
 contract LoanVaultTest is Test {
-    uint256 internal constant WEEK = 1 weeks;
-    uint256 internal constant INSTALLMENTS = 12;
+    uint256 internal constant LOCK_PERIOD = 12 weeks;
 
     MockStablecoin internal stablecoin;
     LoanVault internal vault;
 
     address internal treasury = address(0xBEEF);
     address internal loanManager = address(0xCAFE);
+    address internal transferAdmin = address(0xD00D);
     address internal alice = address(0xA11CE);
     address internal bob = address(0xB0B);
 
     function setUp() external {
         stablecoin = new MockStablecoin();
-        vault = new LoanVault(address(stablecoin), treasury, loanManager);
+        vault = new LoanVault(address(stablecoin), treasury, loanManager, transferAdmin);
 
         stablecoin.mint(alice, 1_000_000_000);
         stablecoin.mint(loanManager, 1_000_000_000);
@@ -43,7 +43,7 @@ contract LoanVaultTest is Test {
         stablecoin.approve(address(vault), type(uint256).max);
     }
 
-    function testBuyInCreatesPositionAndSchedulesRoundPayout() external {
+    function testBuyInCreatesLockedPositionAndLiability() external {
         uint256 amount = 100_000_000; // 100.000000
 
         vm.prank(alice);
@@ -51,20 +51,30 @@ contract LoanVaultTest is Test {
 
         assertEq(stablecoin.balanceOf(treasury), amount, "treasury should receive full gross amount");
 
-        (uint256 principal, uint256 startTime, uint256 startRound, uint256 nbClaims, uint256 payoutAmount) =
-            vault.positions(alice, 0);
+        (uint256 principal, uint256 startTime, uint256 payoutAmount) = vault.positions(alice, 0);
 
-        assertEq(principal, 99_000_000, "principal should be net of 1% fee");
+        uint256 expectedFee = (amount * 100) / 10_000;
+        uint256 expectedNet = amount - expectedFee;
+        uint256 expectedPayout = expectedNet + ((expectedNet * 500) / 10_000);
+
+        assertEq(principal, expectedNet, "principal should be net of fee");
         assertEq(startTime, block.timestamp, "startTime should be current block timestamp");
-        assertEq(startRound, 0, "position should start at current round");
-        assertEq(nbClaims, 0, "position claims should start at zero");
-        assertEq(payoutAmount, 8_662_500, "weekly installment should include 5% yield over 12 installments");
-
-        assertEq(vault.scheduledRoundPayout(1), payoutAmount, "round 1 payout should be scheduled");
-        assertEq(vault.scheduledRoundPayout(12), payoutAmount, "round 12 payout should be scheduled");
+        assertEq(payoutAmount, expectedPayout, "total payout should include full yield");
+        assertEq(vault.totalLiability(), expectedPayout, "liability should track full payout");
     }
 
-    function testClaimPayoutAfterOneFundedRound() external {
+    function testCannotClaimBeforeMaturity() external {
+        uint256 amount = 100_000_000;
+
+        vm.prank(alice);
+        vault.buyIn(amount);
+
+        vm.expectRevert("No payouts available to claim");
+        vm.prank(alice);
+        vault.claimPayout(alice);
+    }
+
+    function testClaimPayoutAfterMaturityWhenFunded() external {
         uint256 amount = 100_000_000;
 
         vm.prank(alice);
@@ -73,15 +83,20 @@ contract LoanVaultTest is Test {
         vm.prank(loanManager);
         vault.depositYield();
 
-        vm.warp(block.timestamp + WEEK);
+        vm.warp(block.timestamp + LOCK_PERIOD);
 
         uint256 bobBalanceBefore = stablecoin.balanceOf(bob);
+        uint256 expectedPayout = vault.totalLiability();
 
         vm.prank(alice);
         uint256 claimed = vault.claimPayout(bob);
 
-        assertEq(claimed, 8_662_500, "should claim exactly one installment");
+        assertEq(claimed, expectedPayout, "should claim full matured payout");
         assertEq(stablecoin.balanceOf(bob), bobBalanceBefore + claimed, "receiver should get claimed funds");
+        assertEq(vault.totalLiability(), 0, "liability should be cleared after claim");
+
+        vm.expectRevert();
+        vault.positions(alice, 0);
     }
 
     function testPayoutCalculationMatchesFormulaForDefaultParams() external {
@@ -90,11 +105,10 @@ contract LoanVaultTest is Test {
         vm.prank(alice);
         vault.buyIn(amount);
 
-        (,,,, uint256 payoutAmount) = vault.positions(alice, 0);
-
+        (,, uint256 payoutAmount) = vault.positions(alice, 0);
         uint256 expectedFee = (amount * 100) / 10_000;
         uint256 expectedNet = amount - expectedFee;
-        uint256 expectedPayout = (expectedNet + ((expectedNet * 500) / 10_000)) / INSTALLMENTS;
+        uint256 expectedPayout = expectedNet + ((expectedNet * 500) / 10_000);
 
         assertEq(payoutAmount, expectedPayout, "payout should match formula with default fee/yield");
     }
@@ -111,11 +125,11 @@ contract LoanVaultTest is Test {
         vm.prank(alice);
         vault.buyIn(amount);
 
-        (, uint256 startTime,,, uint256 payoutAmount) = vault.positions(alice, 0);
+        (, uint256 startTime, uint256 payoutAmount) = vault.positions(alice, 0);
 
         uint256 expectedFee = (amount * 250) / 10_000;
         uint256 expectedNet = amount - expectedFee;
-        uint256 expectedPayout = (expectedNet + ((expectedNet * 800) / 10_000)) / INSTALLMENTS;
+        uint256 expectedPayout = expectedNet + ((expectedNet * 800) / 10_000);
 
         assertEq(startTime, block.timestamp, "position should be created for updated params");
         assertEq(payoutAmount, expectedPayout, "updated fee/yield should be used in payout computation");
@@ -135,22 +149,25 @@ contract LoanVaultTest is Test {
         vault.setYieldPercentage(800);
     }
 
-    function testDepositYieldTooEarlyReverts() external {
+    function testDepositYieldRevertsWhenFullyFunded() external {
+        vm.prank(alice);
+        vault.buyIn(100_000_000);
+
         vm.prank(loanManager);
         vault.depositYield();
 
-        vm.expectRevert("Funding round too early");
+        vm.expectRevert("Vault already fully funded");
         vm.prank(loanManager);
         vault.depositYield();
     }
 
-    function testDepositYieldPullsExactlyScheduledAmount() external {
+    function testDepositYieldPullsExactShortfall() external {
         uint256 amount = 100_000_000;
 
         vm.prank(alice);
         vault.buyIn(amount);
 
-        uint256 expectedRoundAmount = vault.totalNextPayoutAmount();
+        uint256 expectedRoundAmount = vault.nextYieldDepositAmount();
         uint256 managerBalanceBefore = stablecoin.balanceOf(loanManager);
         uint256 vaultBalanceBefore = stablecoin.balanceOf(address(vault));
 
@@ -160,14 +177,14 @@ contract LoanVaultTest is Test {
         assertEq(
             stablecoin.balanceOf(loanManager),
             managerBalanceBefore - expectedRoundAmount,
-            "manager should fund exact scheduled amount"
+            "manager should fund exact shortfall"
         );
         assertEq(
             stablecoin.balanceOf(address(vault)),
             vaultBalanceBefore + expectedRoundAmount,
-            "vault should receive exact scheduled amount"
+            "vault should receive exact shortfall"
         );
-        assertEq(vault.currentRound(), 1, "funding should advance round by one");
+        assertEq(vault.nextYieldDepositAmount(), 0, "shortfall should be zero after funding");
     }
 
     function testDepositYieldRevertsWhenLoanManagerHasInsufficientBalance() external {
@@ -185,50 +202,55 @@ contract LoanVaultTest is Test {
         vault.depositYield();
     }
 
-    function testUserCannotBuyInAndClaimImmediatelyAfterRoundUpdate() external {
-        vm.prank(loanManager);
-        vault.depositYield();
-
+    function testPositionTransferOnlyByTransferAdmin() external {
         vm.prank(alice);
         vault.buyIn(100_000_000);
 
-        vm.expectRevert("No payouts available to claim");
         vm.prank(alice);
-        vault.claimPayout(alice);
+        vm.expectRevert("Only position transfer admin can call this function");
+        vault.transferPosition(alice, bob, 0);
+
+        vm.prank(transferAdmin);
+        vault.transferPosition(alice, bob, 0);
+
+        vm.expectRevert();
+        vault.positions(alice, 0);
+
+        (uint256 principal, uint256 startTime, uint256 payoutAmount) = vault.positions(bob, 0);
+        assertGt(principal, 0, "transferred position principal should be preserved");
+        assertGt(startTime, 0, "transferred position startTime should be preserved");
+        assertGt(payoutAmount, 0, "transferred position payout should be preserved");
     }
 
-    function testUserCannotClaimImmediatelyAfterRoundUpdateWithoutWaitingInterval() external {
+    function testTransferredPositionCanBeClaimedByRecipientAtMaturity() external {
+        uint256 amount = 100_000_000;
+
         vm.prank(alice);
-        vault.buyIn(100_000_000);
+        vault.buyIn(amount);
+
+        vm.prank(transferAdmin);
+        vault.transferPosition(alice, bob, 0);
 
         vm.prank(loanManager);
         vault.depositYield();
 
-        vm.expectRevert("No payouts available to claim");
-        vm.prank(alice);
-        vault.claimPayout(alice);
+        vm.warp(block.timestamp + LOCK_PERIOD);
+
+        uint256 bobBalanceBefore = stablecoin.balanceOf(bob);
+
+        vm.prank(bob);
+        uint256 claimed = vault.claimPayout(bob);
+
+        assertGt(claimed, 0, "recipient should be able to claim transferred matured position");
+        assertEq(stablecoin.balanceOf(bob), bobBalanceBefore + claimed, "recipient should receive payout");
     }
 
-    function testZeroInstallmentPositionCannotBeClaimedAfterMaturity() external {
+    function testOnlyOwnerCanSetPositionTransferAdmin() external {
+        vm.expectRevert("Ownable: caller is not the owner");
         vm.prank(alice);
-        vault.buyIn(1); // Produces payoutAmount == 0 due to integer division by 12
+        vault.setPositionTransferAdmin(bob);
 
-        for (uint256 i = 0; i < 12; i++) {
-            if (i > 0) {
-                vm.warp(block.timestamp + WEEK);
-            }
-            vm.prank(loanManager);
-            vault.depositYield();
-        }
-
-        vm.warp(block.timestamp + WEEK);
-
-        vm.expectRevert("No payouts available to claim");
-        vm.prank(alice);
-        vault.claimPayout(alice);
-
-        // Position remains stuck because claim reverts and state updates roll back.
-        (,,, uint256 nbClaims,) = vault.positions(alice, 0);
-        assertEq(nbClaims, 0, "position should still be unclaimed after reverted claim");
+        vault.setPositionTransferAdmin(bob);
+        assertEq(vault.positionTransferAdmin(), bob, "owner should be able to update transfer admin");
     }
 }

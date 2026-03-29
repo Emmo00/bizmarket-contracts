@@ -9,25 +9,20 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 contract LoanVault is ToronetOwnable, LoanVaultEvents {
     IERC20 public immutable STABLECOIN;
 
-    uint256 public constant PAYOUT_INTERVAL = 1 weeks; // 1 week
-    uint256 public constant NB_OF_PAYOUT_INSTALLATIONS = 12; // 1 per week for 3 months
+    uint256 public constant LOCK_PERIOD = 12 weeks; // 3 months
 
     uint256 public buyInFeePercentage = 100; // 1% fee
     uint256 public yieldPercentage = 500; // 5% yield
-    uint256 public lastClaimEpoch;
-    uint256 public currentRound; // starts at 0, increments by 1 at each funding round
-
-    mapping(uint256 => uint256) public scheduledRoundPayout; // round index => total payout amount scheduled for this round (sum of all positions installments that should be paid at this round)
+    uint256 public totalLiability; // Total payout amount that the vault is liable for across all active positions
 
     address public treasury;
     address public loanManager;
+    address public positionTransferAdmin;
 
     struct Position {
         uint256 principal; // Amount of stablecoin deposited
         uint256 startTime; // Timestamp when the position was opened
-        uint256 startRound; // Funding round index when position was opened
-        uint256 nbClaims; // total number of times the owner of this position has claimed payout
-        uint256 payoutAmount; // Amount of the next payout to be claimed
+        uint256 payoutAmount; // Total payout amount claimable after lock period
     }
 
     mapping(address => Position[]) public positions;
@@ -37,16 +32,24 @@ contract LoanVault is ToronetOwnable, LoanVaultEvents {
         _;
     }
 
-    constructor(address _stablecoin, address _treasury, address _loanManager) {
+    modifier onlyPositionTransferAdmin() {
+        _onlyPositionTransferAdmin();
+        _;
+    }
+
+    constructor(address _stablecoin, address _treasury, address _loanManager, address _positionTransferAdmin) {
         require(_stablecoin != address(0), "Stablecoin cannot be zero address");
         require(_treasury != address(0), "Treasury cannot be zero address");
         require(_loanManager != address(0), "Loan manager cannot be zero address");
+        require(_positionTransferAdmin != address(0), "Position transfer admin cannot be zero address");
 
         STABLECOIN = IERC20(_stablecoin);
         treasury = _treasury;
         loanManager = _loanManager;
+        positionTransferAdmin = _positionTransferAdmin;
 
         emit LoanVaultInitialized(_stablecoin, _treasury, _loanManager);
+        emit PositionTransferAdminUpdated(address(0), _positionTransferAdmin);
     }
 
     function buyIn(uint256 amount) external {
@@ -59,30 +62,21 @@ contract LoanVault is ToronetOwnable, LoanVaultEvents {
         // Transfer the total amount from the depositor to the treasury vault
         require(STABLECOIN.transferFrom(msg.sender, treasury, amount), "Transfer failed");
 
-        // calculate next payout amount for the position
-        uint256 nextPayoutAmount =
-            Percentage.increaseByPercentage(netAmount, yieldPercentage) / NB_OF_PAYOUT_INSTALLATIONS;
+        // Calculate total payout amount that becomes claimable after lock period.
+        uint256 totalPayoutAmount = Percentage.increaseByPercentage(netAmount, yieldPercentage);
 
         // Create a new position for the depositor
         positions[msg.sender].push(
             Position({
                 principal: netAmount,
                 startTime: block.timestamp,
-                startRound: currentRound,
-                nbClaims: 0,
-                payoutAmount: nextPayoutAmount
+                payoutAmount: totalPayoutAmount
             })
         );
 
-        // Schedule one installment per future funded round.
-        for (uint256 installment = 1; installment <= NB_OF_PAYOUT_INSTALLATIONS;) {
-            scheduledRoundPayout[currentRound + installment] += nextPayoutAmount;
-            unchecked {
-                installment++;
-            }
-        }
+        totalLiability += totalPayoutAmount;
 
-        emit PositionBoughtIn(msg.sender, amount, fee, netAmount, nextPayoutAmount);
+        emit PositionBoughtIn(msg.sender, amount, fee, netAmount, totalPayoutAmount);
     }
 
     function claimPayout(address receiver) external returns (uint256) {
@@ -97,30 +91,11 @@ contract LoanVault is ToronetOwnable, LoanVaultEvents {
             uint256 index = i - 1;
             Position storage position = userPositions[index];
 
-            uint256 unlockedByRounds = 0;
-            if (currentRound > position.startRound) {
-                unlockedByRounds = currentRound - position.startRound;
-            }
+            if (block.timestamp >= position.startTime + LOCK_PERIOD) {
+                totalPayoutToClaim += position.payoutAmount;
+                totalLiability -= position.payoutAmount;
 
-            uint256 unlockedByTime = (block.timestamp - position.startTime) / PAYOUT_INTERVAL;
-
-            uint256 unlockedInstallments = unlockedByRounds; // min(unlockedByRounds, unlockedByTime, NB_OF_PAYOUT_INSTALLATIONS)
-            if (unlockedByTime < unlockedInstallments) {
-                unlockedInstallments = unlockedByTime;
-            }
-
-            if (unlockedInstallments > NB_OF_PAYOUT_INSTALLATIONS) {
-                unlockedInstallments = NB_OF_PAYOUT_INSTALLATIONS;
-            }
-
-            if (position.nbClaims < unlockedInstallments) {
-                uint256 nbPendingClaims = unlockedInstallments - position.nbClaims;
-                totalPayoutToClaim += nbPendingClaims * position.payoutAmount;
-                position.nbClaims = unlockedInstallments;
-            }
-
-            if (position.nbClaims == NB_OF_PAYOUT_INSTALLATIONS) {
-                // delete position from user list
+                // Delete matured position from user list.
                 userPositions[index] = userPositions[userPositions.length - 1];
                 userPositions.pop();
             }
@@ -141,21 +116,78 @@ contract LoanVault is ToronetOwnable, LoanVaultEvents {
         return totalPayoutToClaim;
     }
 
+    function availablePayout(address account) external view returns (uint256) {
+        if (account == address(0)) {
+            return 0;
+        }
+
+        Position[] storage userPositions = positions[account];
+        uint256 maturedPayout = 0;
+
+        for (uint256 i = 0; i < userPositions.length;) {
+            Position storage position = userPositions[i];
+
+            if (block.timestamp >= position.startTime + LOCK_PERIOD) {
+                maturedPayout += position.payoutAmount;
+            }
+
+            unchecked {
+                i++;
+            }
+        }
+
+        // claimPayout requires full funding for the matured amount; partial claims are not supported.
+        if (STABLECOIN.balanceOf(address(this)) < maturedPayout) {
+            return 0;
+        }
+
+        return maturedPayout;
+    }
+
     // ========= admin functions =========
     function depositYield() external onlyLoanManager {
-        require(lastClaimEpoch == 0 || block.timestamp >= lastClaimEpoch + PAYOUT_INTERVAL, "Funding round too early");
+        uint256 currentBalance = STABLECOIN.balanceOf(address(this));
+        require(currentBalance < totalLiability, "Vault already fully funded");
 
-        uint256 roundToFund = currentRound + 1;
-        uint256 amountToDeposit = scheduledRoundPayout[roundToFund];
+        uint256 amountToDeposit = totalLiability - currentBalance;
 
-        // Deposit the specified amount of stablecoin as yield to be distributed to depositors
+        // Deposit required stablecoin to fully collateralize all active positions.
         require(STABLECOIN.transferFrom(msg.sender, address(this), amountToDeposit), "Transfer failed");
 
-        // Advance to the newly funded round.
-        currentRound = roundToFund;
-        lastClaimEpoch = block.timestamp;
+        emit YieldDeposited(msg.sender, amountToDeposit, block.timestamp);
+    }
 
-        emit YieldDeposited(msg.sender, amountToDeposit, lastClaimEpoch);
+    function setPositionTransferAdmin(address _positionTransferAdmin) external onlyOwner {
+        require(_positionTransferAdmin != address(0), "Position transfer admin cannot be zero address");
+
+        address previousAdmin = positionTransferAdmin;
+        positionTransferAdmin = _positionTransferAdmin;
+
+        emit PositionTransferAdminUpdated(previousAdmin, _positionTransferAdmin);
+    }
+
+    function transferPosition(address from, address to, uint256 positionIndex) external onlyPositionTransferAdmin {
+        require(from != address(0), "From cannot be zero address");
+        require(to != address(0), "To cannot be zero address");
+
+        Position[] storage fromPositions = positions[from];
+        require(positionIndex < fromPositions.length, "Invalid position index");
+
+        Position memory positionToTransfer = fromPositions[positionIndex];
+
+        fromPositions[positionIndex] = fromPositions[fromPositions.length - 1];
+        fromPositions.pop();
+        positions[to].push(positionToTransfer);
+
+        emit PositionTransferred(
+            msg.sender,
+            from,
+            to,
+            positionIndex,
+            positionToTransfer.principal,
+            positionToTransfer.payoutAmount,
+            positionToTransfer.startTime
+        );
     }
 
     function setBuyInFeePercentage(uint256 _buyInFeePercentage) external onlyLoanManager {
@@ -174,11 +206,20 @@ contract LoanVault is ToronetOwnable, LoanVaultEvents {
         emit YieldPercentageUpdated(previousValue, _yieldPercentage);
     }
 
-    function totalNextPayoutAmount() external view returns (uint256) {
-        return scheduledRoundPayout[currentRound + 1];
+    function nextYieldDepositAmount() external view returns (uint256) {
+        uint256 currentBalance = STABLECOIN.balanceOf(address(this));
+        if (currentBalance >= totalLiability) {
+            return 0;
+        }
+
+        return totalLiability - currentBalance;
     }
 
     function _onlyLoanManager() internal view {
         require(msg.sender == loanManager, "Only loan manager can call this function");
+    }
+
+    function _onlyPositionTransferAdmin() internal view {
+        require(msg.sender == positionTransferAdmin, "Only position transfer admin can call this function");
     }
 }
