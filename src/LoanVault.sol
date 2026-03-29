@@ -67,11 +67,7 @@ contract LoanVault is ToronetOwnable, LoanVaultEvents {
 
         // Create a new position for the depositor
         positions[msg.sender].push(
-            Position({
-                principal: netAmount,
-                startTime: block.timestamp,
-                payoutAmount: totalPayoutAmount
-            })
+            Position({principal: netAmount, startTime: block.timestamp, payoutAmount: totalPayoutAmount})
         );
 
         totalLiability += totalPayoutAmount;
