@@ -155,6 +155,44 @@ contract LoanVault is ToronetOwnable, LoanVaultEvents {
         return allPositions;
     }
 
+    function totalInvested(address account) external view returns (uint256) {
+        if (account == address(0)) {
+            return 0;
+        }
+
+        Position[] storage userPositions = positions[account];
+        uint256 totalPrincipal = 0;
+
+        for (uint256 i = 0; i < userPositions.length;) {
+            totalPrincipal += userPositions[i].principal;
+
+            unchecked {
+                i++;
+            }
+        }
+
+        return totalPrincipal;
+    }
+
+    function projectedPayout(address account) external view returns (uint256) {
+        if (account == address(0)) {
+            return 0;
+        }
+
+        Position[] storage userPositions = positions[account];
+        uint256 totalProjectedPayout = 0;
+
+        for (uint256 i = 0; i < userPositions.length;) {
+            totalProjectedPayout += userPositions[i].payoutAmount;
+
+            unchecked {
+                i++;
+            }
+        }
+
+        return totalProjectedPayout;
+    }
+
     // ========= admin functions =========
     function depositYield() external onlyLoanManager {
         uint256 currentBalance = STABLECOIN.balanceOf(address(this));
