@@ -4,4 +4,7 @@ out = "out"
 libs = ["lib"]
 remappings = ["@openzeppelin=lib/openzeppelin-contracts"]
 
+[rpc_endpoints]
+toronet_testnet = "https://testnet.toronet.org/rpc/"
+
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
