@@ -2,11 +2,11 @@
 pragma solidity ^0.8.18;
 
 import {Percentage} from "./lib/Percentage.sol";
-import {ToronetOwnable} from "./ToronetStandard.sol";
+import {Ownable} from "./Ownable.sol";
 import {LoanVaultEvents} from "./LoanVaultEvents.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-contract LoanVault is ToronetOwnable, LoanVaultEvents {
+contract LoanVault is Ownable, LoanVaultEvents {
     IERC20 public immutable STABLECOIN;
 
     uint256 public constant LOCK_PERIOD = 12 weeks; // 3 months

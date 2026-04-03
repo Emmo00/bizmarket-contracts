@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-abstract contract ToronetOwnable {
+abstract contract Ownable {
     address private _owner;
     address private initialOwner; // The initial owner who deploys the contract
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
