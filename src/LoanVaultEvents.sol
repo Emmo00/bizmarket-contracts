@@ -14,6 +14,8 @@ abstract contract LoanVaultEvents {
 
     event BuyInFeePercentageUpdated(uint256 previousValue, uint256 newValue);
 
+    event LockPeriodUpdated(uint256 previousValue, uint256 newValue);
+
     event YieldPercentageUpdated(uint256 previousValue, uint256 newValue);
 
     event PositionTransferAdminUpdated(address indexed previousAdmin, address indexed newAdmin);

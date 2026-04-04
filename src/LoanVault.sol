@@ -9,7 +9,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 contract LoanVault is Ownable, LoanVaultEvents {
     IERC20 public immutable STABLECOIN;
 
-    uint256 public constant LOCK_PERIOD = 12 weeks; // 3 months
+    uint256 public LOCK_PERIOD = 12 weeks; // 3 months
 
     uint256 public buyInFeePercentage = 100; // 1% fee
     uint256 public yieldPercentage = 500; // 5% yield
@@ -194,11 +194,17 @@ contract LoanVault is Ownable, LoanVaultEvents {
     }
 
     // ========= admin functions =========
-    function depositYield() external onlyLoanManager {
+    function depositYield(uint256 amount) external onlyLoanManager {
         uint256 currentBalance = STABLECOIN.balanceOf(address(this));
         require(currentBalance < totalLiability, "Vault already fully funded");
 
-        uint256 amountToDeposit = totalLiability - currentBalance;
+        uint256 amountToDeposit;
+
+        if (amount > totalLiability - currentBalance || amount == 0) {
+            amountToDeposit = totalLiability - currentBalance;
+        } else {
+            amountToDeposit = amount;
+        }
 
         // Deposit required stablecoin to fully collateralize all active positions.
         require(STABLECOIN.transferFrom(msg.sender, address(this), amountToDeposit), "Transfer failed");
@@ -213,6 +219,15 @@ contract LoanVault is Ownable, LoanVaultEvents {
         positionTransferAdmin = _positionTransferAdmin;
 
         emit PositionTransferAdminUpdated(previousAdmin, _positionTransferAdmin);
+    }
+
+    function setLockPeriod(uint256 _lockPeriod) external onlyLoanManager {
+        require(_lockPeriod > 0, "Lock period must be greater than 0");
+
+        uint256 previousValue = LOCK_PERIOD;
+        LOCK_PERIOD = _lockPeriod;
+
+        emit LockPeriodUpdated(previousValue, _lockPeriod);
     }
 
     function transferPosition(address from, address to, uint256 positionIndex) external onlyPositionTransferAdmin {

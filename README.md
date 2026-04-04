@@ -35,7 +35,8 @@ Main vault contract. Manages user positions, yield distribution, and claims.
 |----------|------|--------|--------|
 | `buyIn(amount)` | Deposit stablecoin | Public | Deduct fee, create position, schedule payouts for 12 future rounds. |
 | `claimPayout(receiver)` | Claim unlocked payouts | Public | Calculate unlocked installments (min of time/round unlock), transfer to receiver, delete fully matured positions. |
-| `depositYield()` | Fund next round | Loan Manager | Pull scheduled payout amount from manager, advance round, update last claim epoch. |
+| `depositYield(amount)` | Fund vault liability | Loan Manager | Pull up to the provided amount from manager, capped at the vault shortfall. |
+| `setLockPeriod(lockPeriod)` | Update lock period | Loan Manager | Sets `LOCK_PERIOD` used to determine maturity for all positions. |
 | `setBuyInFeePercentage(%)` | Update fee | Loan Manager | Bounded to ≤ 10000 (100%). |
 | `setYieldPercentage(%)` | Update yield | Loan Manager | Bounded to ≤ 10000 (100%). |
 
@@ -74,7 +75,7 @@ Utility library for percentage calculations in basis points (100 = 1%, 10000 = 1
    vault.buyIn(1_000_000); // e.g., 1M units (6 decimals = $1M)
    ```
 
-3. **Wait for funding**: Loan manager must call `depositYield()` weekly to fund the vault for payouts.
+3. **Wait for funding**: Loan manager must call `depositYield(amount)` weekly to fund the vault for payouts. Use `vault.nextYieldDepositAmount()` to compute the required amount.
 
 4. **Claim after unlock**: Once both conditions are met (1 week passed + 1 funded round), claim payouts.
    ```solidity
@@ -85,15 +86,21 @@ Utility library for percentage calculations in basis points (100 = 1%, 10000 = 1
 
 ### Admin Flow (Loan Manager)
 
-1. **Fund round weekly**: At most once per week, pull the total scheduled payout amount and advance the round.
+1. **Fund round weekly**: At most once per week, pull the total scheduled payout amount and advance the round. Use `nextYieldDepositAmount()` to determine the required amount.
    ```solidity
-   vault.depositYield();
+   uint256 amount = vault.nextYieldDepositAmount();
+   vault.depositYield(amount);
    ```
 
 2. **Update parameters** (optional): Adjust fee and yield percentages between buy-ins (only affects new positions).
    ```solidity
    vault.setBuyInFeePercentage(150);   // 1.5%
    vault.setYieldPercentage(800);      // 8%
+   ```
+
+3. **Adjust lock duration** (optional): Update maturity horizon for newly maturing claims.
+   ```solidity
+   vault.setLockPeriod(8 weeks);
    ```
 
 ## Testing

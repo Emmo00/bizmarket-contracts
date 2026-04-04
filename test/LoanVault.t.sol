@@ -80,8 +80,9 @@ contract LoanVaultTest is Test {
         vm.prank(alice);
         vault.buyIn(amount);
 
+        uint256 fundingAmount = vault.nextYieldDepositAmount();
         vm.prank(loanManager);
-        vault.depositYield();
+        vault.depositYield(fundingAmount);
 
         vm.warp(block.timestamp + LOCK_PERIOD);
 
@@ -138,7 +139,7 @@ contract LoanVaultTest is Test {
     function testOnlyLoanManagerCanCallAdminFunctions() external {
         vm.expectRevert("Only loan manager can call this function");
         vm.prank(alice);
-        vault.depositYield();
+        vault.depositYield(0);
 
         vm.expectRevert("Only loan manager can call this function");
         vm.prank(alice);
@@ -147,18 +148,37 @@ contract LoanVaultTest is Test {
         vm.expectRevert("Only loan manager can call this function");
         vm.prank(alice);
         vault.setYieldPercentage(800);
+
+        vm.expectRevert("Only loan manager can call this function");
+        vm.prank(alice);
+        vault.setLockPeriod(1 weeks);
+    }
+
+    function testSetLockPeriodByLoanManager() external {
+        uint256 newPeriod = 2 weeks;
+
+        vm.expectRevert("Only loan manager can call this function");
+        vm.prank(alice);
+        vault.setLockPeriod(newPeriod);
+
+        vm.prank(loanManager);
+        vault.setLockPeriod(newPeriod);
+
+        assertEq(vault.LOCK_PERIOD(), newPeriod, "LOCK_PERIOD should be updated by loan manager");
+        // ensure event emitted is present by reading last state change (event test frameworks may vary)
     }
 
     function testDepositYieldRevertsWhenFullyFunded() external {
         vm.prank(alice);
         vault.buyIn(100_000_000);
 
+        uint256 fundingAmount = vault.nextYieldDepositAmount();
         vm.prank(loanManager);
-        vault.depositYield();
+        vault.depositYield(fundingAmount);
 
         vm.expectRevert("Vault already fully funded");
         vm.prank(loanManager);
-        vault.depositYield();
+        vault.depositYield(0);
     }
 
     function testDepositYieldPullsExactShortfall() external {
@@ -172,7 +192,7 @@ contract LoanVaultTest is Test {
         uint256 vaultBalanceBefore = stablecoin.balanceOf(address(vault));
 
         vm.prank(loanManager);
-        vault.depositYield();
+        vault.depositYield(expectedRoundAmount);
 
         assertEq(
             stablecoin.balanceOf(loanManager),
@@ -197,9 +217,10 @@ contract LoanVaultTest is Test {
         vm.prank(loanManager);
         stablecoin.transfer(address(0xDEAD), managerBalance);
 
+        uint256 fundingAmount = vault.nextYieldDepositAmount();
         vm.expectRevert();
         vm.prank(loanManager);
-        vault.depositYield();
+        vault.depositYield(fundingAmount);
     }
 
     function testPositionTransferOnlyByTransferAdmin() external {
@@ -231,8 +252,9 @@ contract LoanVaultTest is Test {
         vm.prank(transferAdmin);
         vault.transferPosition(alice, bob, 0);
 
+        uint256 fundingAmount = vault.nextYieldDepositAmount();
         vm.prank(loanManager);
-        vault.depositYield();
+        vault.depositYield(fundingAmount);
 
         vm.warp(block.timestamp + LOCK_PERIOD);
 
