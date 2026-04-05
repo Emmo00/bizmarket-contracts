@@ -37,27 +37,27 @@ The protocol is a time-locked, maturity-claim vault:
 
 ## Access Model
 There are three control domains:
-- Loan manager domain (custom role in LoanVault): can fund rounds and update fee/yield parameters.
+- Loan manager domain (custom role in LoanVault): can fund vault liability and update fee/yield/lock parameters.
 - Position transfer admin domain (custom role in LoanVault): can transfer positions between wallets.
 - Ownable domain (inherited from ToronetOwnable): owner/initialOwner controls ownership management and destroy().
 
 Important:
-- Funding/fee/yield admin functions are restricted by onlyLoanManager.
+- Funding/fee/yield/lock admin functions are restricted by onlyLoanManager.
 - Position transfer function is restricted by onlyPositionTransferAdmin.
 - setPositionTransferAdmin(...) is restricted by onlyOwner.
 
 ## User-Facing Flow
 1. User approves LoanVault to spend stablecoin.
 2. User calls buyIn(amount).
-3. Loan manager funds vault shortfall by calling depositYield() as needed.
+3. Loan manager funds vault shortfall by calling depositYield(amount) as needed.
 4. User waits until at least 3 months have elapsed for each position.
 5. User calls claimPayout(receiver) to claim all matured positions.
 6. Claimed matured positions are removed automatically.
 
 ## Admin/Manager Flow
 1. Loan manager keeps allowance and stablecoin balance ready.
-2. Calls depositYield() when vault balance is below totalLiability.
-3. Optionally calls setBuyInFeePercentage(...) and setYieldPercentage(...).
+2. Calls depositYield(amount) when vault balance is below totalLiability.
+3. Optionally calls setBuyInFeePercentage(...), setYieldPercentage(...), and setLockPeriod(...).
 4. Monitors nextYieldDepositAmount() as current funding shortfall.
 5. Owner can rotate transfer admin with setPositionTransferAdmin(...).
 6. Transfer admin can call transferPosition(from, to, index) for admin-gated migrations.
@@ -95,14 +95,15 @@ List all externally callable methods and public getters below when explaining AP
 - Emits: PayoutClaimed
 
 ### Loan Manager Admin Methods (onlyLoanManager)
-1. depositYield()
+1. depositYield(uint256 amount)
 - Access: loanManager only
 - Preconditions:
   - vault must not already be fully funded (balance < totalLiability)
   - loanManager approved vault for STABLECOIN transferFrom
-  - loanManager has enough STABLECOIN to fund shortfall
+  - loanManager has enough STABLECOIN to fund selected deposit amount
 - Effects:
-  - amountToDeposit = totalLiability - STABLECOIN.balanceOf(vault)
+  - shortfall = totalLiability - STABLECOIN.balanceOf(vault)
+  - amountToDeposit = shortfall when amount == 0 or amount > shortfall; otherwise amountToDeposit = amount
   - transferFrom(loanManager -> vault, amountToDeposit)
 - Emits: YieldDeposited
 
@@ -121,6 +122,14 @@ List all externally callable methods and public getters below when explaining AP
 - Effects:
   - updates yieldPercentage for future buy-ins
 - Emits: YieldPercentageUpdated
+
+4. setLockPeriod(uint256 _lockPeriod)
+- Access: loanManager only
+- Preconditions:
+  - _lockPeriod > 0
+- Effects:
+  - updates LOCK_PERIOD for maturity checks
+- Emits: LockPeriodUpdated
 
 ### Position Transfer Admin Methods
 1. transferPosition(address from, address to, uint256 positionIndex)
@@ -188,6 +197,7 @@ These are also externally exposed by LoanVault inheritance:
 - PayoutClaimed(account, receiver, amountClaimed)
 - YieldDeposited(loanManager, amount, claimEpoch)
 - BuyInFeePercentageUpdated(previousValue, newValue)
+- LockPeriodUpdated(previousValue, newValue)
 - YieldPercentageUpdated(previousValue, newValue)
 - PositionTransferAdminUpdated(previousAdmin, newAdmin)
 - PositionTransferred(operator, from, to, positionIndex, principal, payoutAmount, startTime)
