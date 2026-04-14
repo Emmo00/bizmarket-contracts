@@ -5,8 +5,11 @@ import {Percentage} from "./lib/Percentage.sol";
 import {Ownable} from "./Ownable.sol";
 import {LoanVaultEvents} from "./LoanVaultEvents.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 contract LoanVault is Ownable, LoanVaultEvents {
+    using SafeERC20 for IERC20;
+
     IERC20 public immutable STABLECOIN;
 
     uint256 public LOCK_PERIOD = 12 weeks; // 3 months
@@ -55,24 +58,24 @@ contract LoanVault is Ownable, LoanVaultEvents {
     function buyIn(uint256 amount) external {
         require(amount > 0, "Amount must be greater than 0");
 
-        // Calculate the fee and the net amount to be deposited
+        // Fee is charged on top of the user-provided principal amount.
         uint256 fee = Percentage.calculate(amount, buyInFeePercentage);
-        uint256 netAmount = amount - fee;
+        uint256 totalChargedAmount = amount + fee;
 
-        // Transfer the total amount from the depositor to the treasury vault
-        require(STABLECOIN.transferFrom(msg.sender, treasury, amount), "Transfer failed");
+        // Transfer principal + fee from the depositor to the treasury vault.
+        STABLECOIN.safeTransferFrom(msg.sender, treasury, totalChargedAmount);
 
         // Calculate total payout amount that becomes claimable after lock period.
-        uint256 totalPayoutAmount = Percentage.increaseByPercentage(netAmount, yieldPercentage);
+        uint256 totalPayoutAmount = Percentage.increaseByPercentage(amount, yieldPercentage);
 
         // Create a new position for the depositor
         positions[msg.sender].push(
-            Position({principal: netAmount, startTime: block.timestamp, payoutAmount: totalPayoutAmount})
+            Position({principal: amount, startTime: block.timestamp, payoutAmount: totalPayoutAmount})
         );
 
         totalLiability += totalPayoutAmount;
 
-        emit PositionBoughtIn(msg.sender, amount, fee, netAmount, totalPayoutAmount);
+        emit PositionBoughtIn(msg.sender, amount, fee, totalChargedAmount, totalPayoutAmount);
     }
 
     function claimPayout(address receiver) external returns (uint256) {
@@ -105,7 +108,7 @@ contract LoanVault is Ownable, LoanVaultEvents {
         require(STABLECOIN.balanceOf(address(this)) >= totalPayoutToClaim, "Protocol not funded for payout");
 
         // Transfer the total payout amount to the depositor
-        require(STABLECOIN.transfer(receiver, totalPayoutToClaim), "Transfer failed");
+        STABLECOIN.safeTransfer(receiver, totalPayoutToClaim);
 
         emit PayoutClaimed(msg.sender, receiver, totalPayoutToClaim);
 
@@ -207,7 +210,7 @@ contract LoanVault is Ownable, LoanVaultEvents {
         }
 
         // Deposit required stablecoin to fully collateralize all active positions.
-        require(STABLECOIN.transferFrom(msg.sender, address(this), amountToDeposit), "Transfer failed");
+        STABLECOIN.safeTransferFrom(msg.sender, address(this), amountToDeposit);
 
         emit YieldDeposited(msg.sender, amountToDeposit, block.timestamp);
     }

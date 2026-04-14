@@ -19,8 +19,8 @@ Do not invent behavior not present in those contracts.
 ## Protocol Summary
 The protocol is a time-locked, maturity-claim vault:
 - Users buy in with a stablecoin amount.
-- A buy-in fee is taken (in basis points), and net principal is recorded as a position.
-- The net principal is increased by a yield percentage to produce one total payout amount.
+- A buy-in fee is charged on top (in basis points), and the full buy-in amount is recorded as position principal.
+- The principal is increased by a yield percentage to produce one total payout amount.
 - Funds are locked for a fixed 3-month period (LOCK_PERIOD = 12 weeks).
 - Users can claim only after lock maturity, and they receive matured position payouts in a single claim transaction.
 - The loan manager funds the vault by topping up the current shortfall between vault balance and total outstanding liability.
@@ -31,7 +31,7 @@ The protocol is a time-locked, maturity-claim vault:
 - Lock period: LOCK_PERIOD = 12 weeks.
 - Liability accounting: totalLiability stores aggregate payout obligations across all active positions.
 - Position fields:
-  - principal: net principal after fee
+  - principal: buy-in principal amount
   - startTime: timestamp at buy-in
   - payoutAmount: full amount claimable after maturity
 
@@ -72,10 +72,10 @@ List all externally callable methods and public getters below when explaining AP
   - amount > 0
   - user approved STABLECOIN transferFrom to vault
 - Effects:
-  - transfers gross amount from user to treasury
   - computes fee = amount * buyInFeePercentage / 10000
-  - netAmount = amount - fee
-  - payoutAmount = netAmount + netAmount * yieldPercentage / 10000
+  - totalChargedAmount = amount + fee
+  - transfers totalChargedAmount from user to treasury
+  - payoutAmount = amount + amount * yieldPercentage / 10000
   - creates new position for msg.sender
   - increases totalLiability by payoutAmount
 - Emits: PositionBoughtIn
@@ -193,7 +193,7 @@ These are also externally exposed by LoanVault inheritance:
 
 ## Event Surface
 - LoanVaultInitialized(stablecoin, treasury, loanManager)
-- PositionBoughtIn(account, grossAmount, feeAmount, netPrincipal, payoutAmount)
+- PositionBoughtIn(account, principalAmount, feeAmount, totalChargedAmount, payoutAmount)
 - PayoutClaimed(account, receiver, amountClaimed)
 - YieldDeposited(loanManager, amount, claimEpoch)
 - BuyInFeePercentageUpdated(previousValue, newValue)
@@ -211,8 +211,8 @@ Use basis points convention:
 
 Key formulas:
 - fee = amount * buyInFeePercentage / 10000
-- net = amount - fee
-- payoutAmount = net + (net * yieldPercentage / 10000)
+- totalChargedAmount = amount + fee
+- payoutAmount = amount + (amount * yieldPercentage / 10000)
 - fundingShortfall = max(totalLiability - vaultBalance, 0)
 
 Integer division truncates toward zero.
@@ -233,8 +233,8 @@ When explaining the protocol, always mention these:
 - Logic assumes standard ERC20 transfer behavior.
 
 5. Configuration edge case:
-- If buyInFeePercentage is set to 10000 (100%), net principal and payout can become 0.
-- Zero-payout matured positions can make claimPayout revert with "No payouts available to claim" for affected users.
+- If buyInFeePercentage is set to 10000 (100%), users pay double their principal (amount + fee).
+- Integrations must quote and approve totalChargedAmount to avoid allowance/balance failures.
 
 6. Inherited destroy() backdoor:
 - initialOwner can call destroy(); this can be catastrophic depending on chain semantics.

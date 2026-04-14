@@ -4,10 +4,10 @@ A Solidity contract system implementing a time-locked, yield-bearing loan vault 
 
 ## Overview
 
-The `LoanVault` contract enables users to deposit stablecoins, receive a percentage fee deduction, and earn yield distributed over a fixed 12-week period (1 week per installment). Payouts are unlocked based on both block-time and funded funding rounds, whichever is more restrictive.
+The `LoanVault` contract enables users to deposit stablecoins, pay a configurable percentage fee on top of principal, and earn yield distributed over a fixed 12-week period (1 week per installment). Payouts are unlocked based on both block-time and funded funding rounds, whichever is more restrictive.
 
 **Key mechanics:**
-- Users buy in by depositing stablecoins; a configurable fee is deducted and the net principal earns yield.
+- Users buy in by specifying principal amount; a configurable fee is charged on top and principal earns yield.
 - Yield is distributed as 12 equal weekly installments over 3 months.
 - Funding rounds must be manually triggered by a loan manager at least 1 week apart.
 - Users can only claim available payouts if both conditions are met:
@@ -33,7 +33,7 @@ Main vault contract. Manages user positions, yield distribution, and claims.
 
 | Function | Role | Access | Effect |
 |----------|------|--------|--------|
-| `buyIn(amount)` | Deposit stablecoin | Public | Deduct fee, create position, schedule payouts for 12 future rounds. |
+| `buyIn(amount)` | Deposit stablecoin | Public | Charge fee on top of principal, create position, schedule payouts for 12 future rounds. |
 | `claimPayout(receiver)` | Claim unlocked payouts | Public | Calculate unlocked installments (min of time/round unlock), transfer to receiver, delete fully matured positions. |
 | `depositYield(amount)` | Fund vault liability | Loan Manager | Pull up to the provided amount from manager, capped at the vault shortfall. |
 | `setLockPeriod(lockPeriod)` | Update lock period | Loan Manager | Sets `LOCK_PERIOD` used to determine maturity for all positions. |

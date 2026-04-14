@@ -5,7 +5,11 @@ abstract contract LoanVaultEvents {
     event LoanVaultInitialized(address indexed stablecoin, address indexed treasury, address indexed loanManager);
 
     event PositionBoughtIn(
-        address indexed account, uint256 grossAmount, uint256 feeAmount, uint256 netPrincipal, uint256 payoutAmount
+        address indexed account,
+        uint256 principalAmount,
+        uint256 feeAmount,
+        uint256 totalChargedAmount,
+        uint256 payoutAmount
     );
 
     event PayoutClaimed(address indexed account, address indexed receiver, uint256 amountClaimed);

@@ -29,6 +29,14 @@ contract LoanVaultTest is Test {
     address internal alice = address(0xA11CE);
     address internal bob = address(0xB0B);
 
+    event PositionBoughtIn(
+        address indexed account,
+        uint256 principalAmount,
+        uint256 feeAmount,
+        uint256 totalChargedAmount,
+        uint256 payoutAmount
+    );
+
     function setUp() external {
         stablecoin = new MockStablecoin();
         vault = new LoanVault(address(stablecoin), treasury, loanManager, transferAdmin);
@@ -45,19 +53,18 @@ contract LoanVaultTest is Test {
 
     function testBuyInCreatesLockedPositionAndLiability() external {
         uint256 amount = 100_000_000; // 100.000000
+        uint256 expectedFee = (amount * 100) / 10_000;
+        uint256 expectedTotalCharge = amount + expectedFee;
+        uint256 expectedPayout = amount + ((amount * 500) / 10_000);
 
         vm.prank(alice);
         vault.buyIn(amount);
 
-        assertEq(stablecoin.balanceOf(treasury), amount, "treasury should receive full gross amount");
+        assertEq(stablecoin.balanceOf(treasury), expectedTotalCharge, "treasury should receive principal plus fee");
 
         (uint256 principal, uint256 startTime, uint256 payoutAmount) = vault.positions(alice, 0);
 
-        uint256 expectedFee = (amount * 100) / 10_000;
-        uint256 expectedNet = amount - expectedFee;
-        uint256 expectedPayout = expectedNet + ((expectedNet * 500) / 10_000);
-
-        assertEq(principal, expectedNet, "principal should be net of fee");
+        assertEq(principal, amount, "principal should match buy-in amount");
         assertEq(startTime, block.timestamp, "startTime should be current block timestamp");
         assertEq(payoutAmount, expectedPayout, "total payout should include full yield");
         assertEq(vault.totalLiability(), expectedPayout, "liability should track full payout");
@@ -107,9 +114,7 @@ contract LoanVaultTest is Test {
         vault.buyIn(amount);
 
         (,, uint256 payoutAmount) = vault.positions(alice, 0);
-        uint256 expectedFee = (amount * 100) / 10_000;
-        uint256 expectedNet = amount - expectedFee;
-        uint256 expectedPayout = expectedNet + ((expectedNet * 500) / 10_000);
+        uint256 expectedPayout = amount + ((amount * 500) / 10_000);
 
         assertEq(payoutAmount, expectedPayout, "payout should match formula with default fee/yield");
     }
@@ -128,12 +133,34 @@ contract LoanVaultTest is Test {
 
         (, uint256 startTime, uint256 payoutAmount) = vault.positions(alice, 0);
 
-        uint256 expectedFee = (amount * 250) / 10_000;
-        uint256 expectedNet = amount - expectedFee;
-        uint256 expectedPayout = expectedNet + ((expectedNet * 800) / 10_000);
+        uint256 expectedPayout = amount + ((amount * 800) / 10_000);
 
         assertEq(startTime, block.timestamp, "position should be created for updated params");
         assertEq(payoutAmount, expectedPayout, "updated fee/yield should be used in payout computation");
+    }
+
+    function testBuyInEmitsFeeOnTopEventValues() external {
+        uint256 amount = 100_000_000;
+        uint256 expectedFee = (amount * 100) / 10_000;
+        uint256 expectedTotalCharge = amount + expectedFee;
+        uint256 expectedPayout = amount + ((amount * 500) / 10_000);
+
+        vm.expectEmit(true, false, false, true, address(vault));
+        emit PositionBoughtIn(alice, amount, expectedFee, expectedTotalCharge, expectedPayout);
+
+        vm.prank(alice);
+        vault.buyIn(amount);
+    }
+
+    function testBuyInRevertsWhenAllowanceCoversOnlyPrincipal() external {
+        uint256 amount = 100_000_000;
+
+        vm.prank(alice);
+        stablecoin.approve(address(vault), amount);
+
+        vm.expectRevert();
+        vm.prank(alice);
+        vault.buyIn(amount);
     }
 
     function testOnlyLoanManagerCanCallAdminFunctions() external {
